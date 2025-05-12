@@ -1,0 +1,256 @@
+---
+title: "RTW and Manufacturing in the United States"
+author: "Byron Pelton"
+date: "2025-05-06"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r, eval = FALSE, echo = FALSE, message = FALSE}
+rm(list = ls())
+gc()
+```
+
+```{r, echo = FALSE, message = FALSE}
+library(tidyverse)
+library(janitor)
+library(rvest)
+library(maps)
+library(ggnewscale)
+```
+
+Creating versions of state names/abbreviations that include DC
+
+```{r regions_codes_names, cache = TRUE}
+codes <- state.abb %>% append("DC", after = 8)
+regions <- state.name %>% append("District of Columbia", after = 8)
+```
+
+Creating a vector of urls for FRED pages with state manufacturing data
+
+```{r links, cache = TRUE}
+links <- case_when(
+  codes == "AL" ~ "https://fred.stlouisfed.org/data/SMU01000003000000001SA",
+  codes == "DC" ~ "https://fred.stlouisfed.org/data/SMU11000003000000001SA",
+  TRUE ~ paste0("https://fred.stlouisfed.org/data/", codes, "MFG")
+)
+
+```
+
+Create an empty tibble that will populate with scraped FRED data
+
+```{r empty_long, cache = TRUE}
+manu_long <- tibble(date = NULL, value = NULL, region = NULL)
+```
+
+Scrape monthly FRED data on manufacturing from each state
+
+```{r gather_manu_data, cache = TRUE}
+n <- 0
+for(i in 1:length(links)){
+  manu_long <- links[i] %>%
+    read_html() %>%
+    html_element("table#data-table-observations") %>%
+    html_table() %>%
+    rename(date = DATE, value = VALUE) %>%
+    mutate(
+      region = codes[i],
+      date = date %>% as.Date()) %>%
+    bind_rows(manu_long, .)
+  pct <- floor((i/length(links))*100)
+  
+  if(n == 0 & pct >= 25){
+    n <- 25
+    paste0(n, "% complete. . .") %>% print()
+  } else if(n == 25 & pct >= 50){
+    n <- 50
+    paste0(n, "% complete. . .") %>% print()
+  } else if(n == 50 & pct >= 75){
+    n <- 75
+    paste0(n, "% complete. . .") %>% print()
+  } else if(n == 75 & pct >= 100){
+    n <- 100
+    paste0(n, "% complete. . .") %>% print()
+  }
+
+  Sys.sleep(0.1)
+}
+```
+
+Create a wide version of manu_long using pivot_wider for later use in mapping
+
+```{r pivot_manu_wider, cache = TRUE}
+manu_wide <- manu_long %>%
+  pivot_wider(names_from = date, values_from = value)
+```
+
+Scrape data on Right-To-Work states and format the resulting table
+
+```{r gather_rtw_data, cache = TRUE}
+rtw_data <- "https://nrtwc.org/facts/state-right-to-work-timeline-2016/" %>%
+  read_html() %>%
+  html_element("table") %>%
+  html_table(header = TRUE) %>%
+  rename(
+    region = 'Right to Work State*',
+    date = 'Right to Work Date',
+    method = 'By Statute or Constitutional Provision'
+  ) %>%
+
+  mutate(
+    across(everything(), ~ gsub("^\\*+|\\*+$", "", as.character(.)))) %>%
+  mutate(
+    date = date %>% as.Date(format = "%A, %B %d, %Y")) %>%
+  mutate(
+    region = state.abb[match(region, state.name)])
+```
+
+```{r new_rtw_column}
+manu_long <- manu_long %>%
+    mutate(
+        rtw = ifelse(
+            region %in% rtw_data$region &
+            date >= rtw_data$date[match(region, rtw_data$region)],
+            TRUE,
+            FALSE
+        )
+    )
+```
+
+```{r states_map_changes}
+states_map <- map_data("state")
+
+state_changes <- tibble(
+  region = regions[match(manu_wide$region, codes)] %>% tolower(),
+  abs_ch_90 = manu_wide$`2025-03-01` - manu_wide$`1990-01-01`,
+  pct_ch_90 = ((manu_wide$`2025-03-01` - manu_wide$`1990-01-01`)/manu_wide$`1990-01-01`)*100,
+  abs_ch_00 = manu_wide$`2025-03-01` - manu_wide$`2000-01-01`,
+  pct_ch_00 = ((manu_wide$`2025-03-01` - manu_wide$`2000-01-01`)/manu_wide$`2000-01-01`)*100,
+  rtw25 = case_when(
+    manu_wide$region == "MI" ~ FALSE,
+    manu_wide$region %in% rtw_data$region ~ TRUE,
+    TRUE ~ FALSE),
+  rtw00 = case_when(
+    manu_wide$region %in% c("OK", "IN", "MI", "WI", "KY") ~ FALSE,
+    manu_wide$region %in% rtw_data$region ~ TRUE,
+    TRUE ~ FALSE)
+)
+
+merged_changes <- left_join(states_map, state_changes, by = "region")
+```
+
+```{r merged_changes_map}
+ggplot(merged_changes, aes(x = long, y = lat, group = group, fill = abs_change)) +
+  geom_polygon(color = "black") +
+  coord_fixed(1.3) +
+  scale_fill_gradient2(low = "#FF0000", high = "#0000BF", midpoint = 0) +
+  theme_minimal() +
+  labs(title = "Percent Change in Manufacturing Employment Since 1990 By State",
+       fill = "Change",
+       x = NULL, y = NULL) +
+  theme(axis.text = element_blank(), axis.ticks = element_blank(),
+        panel.grid = element_blank(), plot.caption = element_text(hjust = 0),
+        plot.title = element_text(hjust = 0.5))
+```
+
+```{r rtw_map_2025}
+ggplot(merged_changes, aes(x = long, y = lat, group = group, fill = rtw2025)) +
+  geom_polygon(color = "black") +
+  coord_fixed(1.3) +
+  scale_fill_manual(values = c("TRUE" = "#0000BF", "FALSE" = "#FF0000")) +
+  theme_minimal() +
+  labs(title = "States With Right-To-Work in 2025",
+       fill = "Right to Work?",
+       x = NULL, y = NULL) +
+  theme(axis.text = element_blank(), axis.ticks = element_blank(),
+        panel.grid = element_blank())
+```
+
+```{r rtw_map_2000}
+ggplot(merged_changes, aes(x = long, y = lat, group = group, fill = rtw2000)) +
+  geom_polygon(color = "black") +
+  coord_fixed(1.3) +
+  scale_fill_manual(values = c("TRUE" = "#0000BF", "FALSE" = "#FF0000")) +
+  theme_minimal() +
+  labs(title = "States With Right-To-Work in 2000",
+       fill = "Right to Work?",
+       x = NULL, y = NULL) +
+  theme(axis.text = element_blank(), axis.ticks = element_blank(),
+        panel.grid = element_blank())
+```
+
+```{r graph_KY_TN_manu, message = FALSE}
+manu_long %>%
+  filter(
+    region %in% c("KY", "TN"),
+    date >= as.Date("1990-01-01"),
+    date <= as.Date("2007-01-01")
+  ) %>%
+  ggplot(aes(x = date, y = value)) +
+  geom_point(color = "#3f81f5") +
+  geom_vline(
+    xintercept = c("2000-10-10") %>% as.Date(),
+    linetype = "dashed",
+    color = "black"
+  ) +
+  geom_smooth(
+    data = filter(manu_long, region == "KY", date >= as.Date("1990-01-01"),
+                  date <= as.Date("2000-10-10")),
+    method = lm, se = FALSE, color = "red"
+  ) +
+  geom_smooth(
+    data = filter(manu_long, region == "KY", date >= as.Date("2000-10-10"),
+                  date <= as.Date("2007-01-01")),
+    method = lm, se = FALSE, color = "red"
+  ) +
+  geom_smooth(
+    data = filter(manu_long, region == "TN", date >= as.Date("1990-01-01"),
+                  date <= as.Date("2000-10-10")),
+    method = lm, se = FALSE, color = "red"
+  ) +
+  geom_smooth(
+    data = filter(manu_long, region == "TN", date >= as.Date("2000-10-10"),
+                  date <= as.Date("2007-01-01")),
+    method = lm, se = FALSE, color = "red"
+  )
+```
+
+```{r graph_KY_TN_manu_NoRec, message = FALSE}
+manu_long %>%
+  filter(
+    region %in% c("KY", "TN"),
+    (date >= as.Date("1991-04-01") & date <= as.Date("2001-02-28")) |
+    (date >= as.Date("2001-12-01") & date <= as.Date("2007-11-30")) |
+    (date >= as.Date("2009-07-01") & date <= as.Date("2020-01-31")) |
+    (date >= as.Date("2020-05-01") & date <= as.Date("2025-03-01"))
+  ) %>%
+  ggplot(aes(x = date, y = value)) +
+  geom_point(color = "#3f81f5") +
+  geom_vline(
+    xintercept = c("2000-10-10") %>% as.Date(),
+    linetype = "dashed",
+    color = "black"
+  ) +
+  geom_smooth(
+    data = filter(manu_long, region == "KY", date >= as.Date("1990-01-01"),
+                  date <= as.Date("2000-10-10")),
+    method = lm, se = FALSE, color = "red"
+  ) +
+  geom_smooth(
+    data = filter(manu_long, region == "KY", date >= as.Date("2000-10-10"),
+                  date <= as.Date("2007-01-01")),
+    method = lm, se = FALSE, color = "red"
+  ) +
+  geom_smooth(
+    data = filter(manu_long, region == "TN", date >= as.Date("1990-01-01"),
+                  date <= as.Date("2000-10-10")),
+    method = lm, se = FALSE, color = "red"
+  ) +
+  geom_smooth(
+    data = filter(manu_long, region == "TN", date >= as.Date("2000-10-10"),
+                  date <= as.Date("2007-01-01")),
+    method = lm, se = FALSE, color = "red"
+  )
+```
+
